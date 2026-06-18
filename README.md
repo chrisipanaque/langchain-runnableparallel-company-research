@@ -105,7 +105,7 @@ User Input: "OpenAI"
 
 ```bash
 # 1. Clone
-git clone https://github.com/your-username/company-research.git
+git clone https://github.com/chrisipanaque/langchain-runnableparallel-company-research.git
 cd company-research
 
 # 2. Install
