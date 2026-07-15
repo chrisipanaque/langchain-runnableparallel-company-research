@@ -115,7 +115,7 @@ async def test_github_success() -> None:
         )
         respx.get(
             "https://api.github.com/orgs/acme/repos",
-            params={"sort": "stars", "direction": "desc", "per_page": 10, "page": 1},
+            params={"per_page": 100, "page": 1},
         ).mock(
             return_value=httpx.Response(
                 200,
@@ -139,10 +139,6 @@ async def test_github_success() -> None:
                 ],
             )
         )
-        respx.get(
-            "https://api.github.com/orgs/acme/repos",
-            params={"sort": "stars", "direction": "desc", "per_page": 10, "page": 2},
-        ).mock(return_value=httpx.Response(200, json=[]))
         respx.get("https://api.github.com/repos/acme/foo/languages").mock(
             return_value=httpx.Response(200, json={"Python": 50000})
         )
@@ -172,6 +168,68 @@ async def test_github_success() -> None:
         assert result.top_repos[0].name == "foo"
         assert result.top_repos[0].stars == 100
         assert result.top_repos[1].language == "Rust"
+        assert result.total_stars == 150
         assert result.languages["Python"] == 50000
         assert result.languages["Rust"] == 30000
         assert result.contributors_count == 5
+
+
+@pytest.mark.asyncio
+async def test_github_ranks_repos_by_stars_client_side() -> None:
+    """The org repos endpoint cannot sort by stars, so ranking must happen
+    client-side. Feed repos in a non-star order and assert they come back
+    ranked, and that total_stars sums the whole org (not just the top slice).
+    """
+    with respx.mock:
+        respx.get("https://api.github.com/orgs/acme").mock(
+            return_value=httpx.Response(
+                200, json={"login": "acme", "public_repos": 3}
+            )
+        )
+        respx.get(
+            "https://api.github.com/orgs/acme/repos",
+            params={"per_page": 100, "page": 1},
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "low",
+                        "html_url": "https://github.com/acme/low",
+                        "description": None,
+                        "stargazers_count": 3,
+                        "forks_count": 0,
+                        "language": "Python",
+                    },
+                    {
+                        "name": "high",
+                        "html_url": "https://github.com/acme/high",
+                        "description": None,
+                        "stargazers_count": 900,
+                        "forks_count": 0,
+                        "language": "Go",
+                    },
+                    {
+                        "name": "mid",
+                        "html_url": "https://github.com/acme/mid",
+                        "description": None,
+                        "stargazers_count": 40,
+                        "forks_count": 0,
+                        "language": "Rust",
+                    },
+                ],
+            )
+        )
+        for name in ("low", "high", "mid"):
+            respx.get(f"https://api.github.com/repos/acme/{name}/languages").mock(
+                return_value=httpx.Response(200, json={})
+            )
+        respx.get(
+            "https://api.github.com/orgs/acme/members",
+            params={"per_page": 1},
+        ).mock(return_value=httpx.Response(200, json=[]))
+
+        result = await retrieve_github("acme")
+        assert result is not None
+        assert [r.name for r in result.top_repos] == ["high", "mid", "low"]
+        assert result.total_stars == 943

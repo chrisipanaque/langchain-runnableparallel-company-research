@@ -10,6 +10,9 @@ from company_research.schemas.models import GitHubData, RepoInfo, SourceMetadata
 
 GITHUB_API = "https://api.github.com"
 
+TOP_REPOS_LIMIT = 10
+REPOS_PER_PAGE = 100
+
 
 def _auth_headers() -> dict[str, str]:
     headers: dict[str, str] = {
@@ -40,13 +43,20 @@ async def _fetch_org(org: str, client: httpx.AsyncClient) -> dict[str, Any]:
 async def _fetch_repos(
     org: str, client: httpx.AsyncClient
 ) -> list[dict[str, Any]]:
+    """Fetch every public repo for the org.
+
+    Note: GitHub's ``GET /orgs/{org}/repos`` endpoint only supports
+    ``sort`` values of ``created | updated | pushed | full_name`` (default
+    ``created``) -- there is no server-side ``stars`` sort, so an invalid
+    value is silently ignored. To rank by stars we must page through all
+    repositories and sort client-side (see :func:`retrieve_github`).
+    """
     repos: list[dict[str, Any]] = []
     page = 1
-    per_page = 10
-    while len(repos) < 10:
+    while True:
         resp = await client.get(
             f"{GITHUB_API}/orgs/{org}/repos",
-            params={"sort": "stars", "direction": "desc", "per_page": per_page, "page": page},
+            params={"per_page": REPOS_PER_PAGE, "page": page},
             headers=_auth_headers(),
             timeout=settings.request_timeout,
         )
@@ -55,8 +65,10 @@ async def _fetch_repos(
         if not batch:
             break
         repos.extend(batch)
+        if len(batch) < REPOS_PER_PAGE:
+            break
         page += 1
-    return repos[:10]
+    return repos
 
 
 async def _fetch_languages(
@@ -126,6 +138,12 @@ async def retrieve_github(company_name: str) -> GitHubData | None:
             msg = f"GitHub request failed: {e}"
             raise GitHubRetrievalError(msg) from e
 
+        # Rank client-side: the API cannot sort org repos by stars.
+        repos_data.sort(
+            key=lambda r: r.get("stargazers_count", 0), reverse=True
+        )
+        top_repos_data = repos_data[:TOP_REPOS_LIMIT]
+
         top_repos = [
             RepoInfo(
                 name=r["name"],
@@ -135,14 +153,15 @@ async def retrieve_github(company_name: str) -> GitHubData | None:
                 forks=r.get("forks_count", 0),
                 language=r.get("language"),
             )
-            for r in repos_data
+            for r in top_repos_data
         ]
 
-        languages = await _aggregate_languages(org, repos_data, client)
+        languages = await _aggregate_languages(org, top_repos_data, client)
         members_count = await _fetch_members_count(org, client)
 
     elapsed = int((datetime.now() - start).total_seconds() * 1000)
-    total_stars = sum(r.stars for r in top_repos)
+    # Total stars across the whole org, not just the top slice.
+    total_stars = sum(r.get("stargazers_count", 0) for r in repos_data)
 
     return GitHubData(
         metadata=SourceMetadata(
